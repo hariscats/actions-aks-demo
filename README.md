@@ -114,6 +114,31 @@ az aks update -n $AKS_CLUSTER_NAME -g $AKS_RESOURCE_GROUP --attach-acr $ACR_NAME
    cd actions-runner-controller/charts
    ```
 
+After cloning, update the values.yaml files for each chart to reference the correct image location in your ACR. This ensures that the deployment will pull images directly from ACR instead of the default GitHub Container Registry.
+
+For the Runner Scale Set Controller (gha-runner-scale-set-controller):
+
+Open gha-runner-scale-set-controller/values.yaml and set the image.repository to your ACR URL:
+
+```yaml
+image:
+  repository: "hcats0503022020.azurecr.io/gha-runner-scale-set-controller"
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "0.9.3"
+```
+
+For the Actions Runner (gha-runner-scale-set):
+Open gha-runner-scale-set/values.yaml and set the image.repository to your ACR URL:
+
+```yaml
+spec:
+    containers:
+      - name: runner
+        image: hcats0503022020.azurecr.io/actions-runner:2.320.0
+        command: ["/home/runner/run.sh"]
+```
+
 2. **Package the Helm Chart**:
 
    Use the `helm package` command to create `.tgz` files for the charts.
