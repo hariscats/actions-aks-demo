@@ -4,52 +4,54 @@
 
 This tutorial demonstrates how to:
 1. Create and configure an Azure Container Registry (ACR).
-2. Import the GitHub Actions Runner Controller Helm chart into ACR.
-3. Attach the ACR to an AKS cluster and deploy the controller from ACR.
+2. Import GitHub Actions Runner and Runner Controller container images into ACR.
+3. Clone, package, and push the Helm chart to ACR.
+4. Deploy the GitHub Actions Runner Controller and Scale Set to AKS.
+5. Test the setup by running a sample GitHub Actions workflow.
 
 ### Prerequisites
-- **Azure CLI**, **kubectl**, and **Helm** are installed on your machine or Azure Cloud Shell.
-- An AKS cluster is set up, or create one as detailed below.
-- A resource group for the ACR (separate from or the same as the AKS resource group).
+- **Azure CLI**, **kubectl**, and **Helm** installed locally or in Azure Cloud Shell.
+- An AKS cluster set up, or instructions to create one are provided below.
+- A resource group for the ACR, either separate or the same as the AKS resource group.
 
 ### Step 1: Define Environment Variables
 
-Define variables for your setup. Replace values as needed.
+Define variables for your setup and replace placeholder values as needed.
 
-```bash
+```powershell
 # Core Variables
-$AKS_RESOURCE_GROUP="aksRG"                                              # AKS resource group name
-$LOCATION="CentralUS"                                                    # Region
-$AKS_CLUSTER_NAME="aksCluster"                                           # AKS cluster name
-$ACR_NAME="hcats0503022020"                                              # ACR name (must be unique across Azure)
-$ACR_RESOURCE_GROUP="aksRG"                                              # ACR resource group name
-$GITHUB_CONFIG_URL="https://github.com/hariscats/actions-aks-demo"       # GitHub repo/org URL for the controller
+$AKS_RESOURCE_GROUP="aksRG"                         # AKS resource group name
+$LOCATION="CentralUS"                               # Azure region
+$AKS_CLUSTER_NAME="aksCluster"                      # AKS cluster name
+$ACR_NAME="hcats0503022020"                         # ACR name (must be unique across Azure)
+$ACR_RESOURCE_GROUP="aksRG"                         # ACR resource group name
+$GITHUB_CONFIG_URL="https://github.com/hariscats/actions-aks-demo"  # GitHub repository or organization URL for the controller
 
-# Namespace Variables
-$NAMESPACE_ARC_CONTROLLER="arc-controller-ns"     # Namespace for ARC controller
-$NAMESPACE_ARC_RUNNERS="arc-runners-ns"           # Namespace for ARC runners
-$ARC_CONTROLLER_NAME="arc-controller"             # Helm release name for ARC controller
-$ARC_RUNNER_SCALESET_NAME="arc-runner-set"        # Helm release name for runner scale set
-$ARC_RUNNER_GITHUB_SECRET_NAME="github-secret"    # Name of the secret for GitHub credentials
+# Namespace and Release Names
+$NAMESPACE_ARC_CONTROLLER="arc-controller-ns"       # Namespace for the controller
+$NAMESPACE_ARC_RUNNERS="arc-runners"                # Namespace for the runners
+$ARC_CONTROLLER_NAME="scale-set-controller"         # Helm release name for the controller
+$ARC_RUNNER_SCALESET_NAME="arc-runner-set"          # Helm release name for the runner scale set
+$GITHUB_PAT="<PAT>"                                 # GitHub Personal Access Token
 ```
 
-Create resource group.
+Create the resource group if it doesn’t exist:
 
-```bash
+```powershell
 az group create --name $AKS_RESOURCE_GROUP --location $LOCATION
 ```
 
 ### Step 2: Create an Azure Container Registry (ACR)
 
-Create an ACR in the specified resource group.
+Create an ACR in the specified resource group:
 
-```bash
+```powershell
 az acr create --resource-group $AKS_RESOURCE_GROUP --name $ACR_NAME --sku Standard
 ```
 
-Create AKS cluster.
+Create the AKS cluster:
 
-```bash
+```powershell
 az aks create `
     --resource-group $AKS_RESOURCE_GROUP `
     --name $AKS_CLUSTER_NAME `
@@ -66,143 +68,138 @@ az aks create `
 
 ### Step 3: Attach ACR to AKS Cluster
 
-For AKS to pull images from ACR, grant it the required permissions.
+For AKS to pull images from ACR, grant it the required permissions:
 
-1. **For AKS with Managed Identity**:
-
-   ```bash
-   az aks update -n $AKS_CLUSTER_NAME -g $AKS_RESOURCE_GROUP --attach-acr $ACR_NAME
-   ```
-
-2. **For AKS with Service Principal**:
-
-   For older clusters that use a Service Principal (SP), get the SP client ID and assign the `AcrPull` role to it:
-
-   ```bash
-   # Get the AKS Service Principal ID
-   AKS_SP_ID=$(az aks show --resource-group $AKS_RESOURCE_GROUP --name $AKS_CLUSTER_NAME --query "servicePrincipalProfile.clientId" --output tsv)
-
-   # Grant AKS Service Principal access to ACR
-   ACR_ID=$(az acr show --name $ACR_NAME --resource-group $ACR_RESOURCE_GROUP --query "id" --output tsv)
-   az role assignment create --assignee $AKS_SP_ID --role AcrPull --scope $ACR_ID
-   ```
-
-### Step 4: Import the GitHub Actions Runner Helm Chart to ACR
-
-Import the GitHub Actions Runner Controller Helm chart from GitHub’s container registry to your ACR.
-
-```bash
-az acr import --name $ACR_NAME --source ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller:0.9.0 --image actions-runner-controller/gha-runner-scale-set-controller:0.9.0
+```powershell
+az aks update -n $AKS_CLUSTER_NAME -g $AKS_RESOURCE_GROUP --attach-acr $ACR_NAME
 ```
 
-To verify that the chart was imported successfully:
+### Step 4: Pull and Push Required Container Images to ACR
 
-```bash
-az acr repository show --name $ACR_NAME --repository actions-runner-controller/gha-runner-scale-set-controller
-```
+1. **Pull GitHub Actions Runner and Controller Images**:
 
-### Step 5: Configure `kubectl` to Access the cluster
+   Pull the container images directly from GitHub Packages:
+   - **Runner Scale Set Controller**: [GitHub Actions Runner Controller (v0.9.3)](https://github.com/actions/actions-runner-controller/pkgs/container/gha-runner-scale-set-controller/234741940?tag=0.9.3)
+   - **Actions Runner**: [GitHub Actions Runner](https://github.com/actions/runner/pkgs/container/actions-runner)
+
+   ```powershell
+   docker pull ghcr.io/actions/gha-runner-scale-set-controller:0.9.3
+   docker pull ghcr.io/actions/actions-runner:2.320.0
+   ```
+
+2. **Tag the Images for ACR**:
+
+   Replace `<ACR_LOGIN_SERVER>` with your actual ACR login server, typically in the format `<acr-name>.azurecr.io`.
+
+   ```powershell
+   $ACR_LOGIN_SERVER=$(az acr show --name $ACR_NAME --query loginServer --output tsv)
+   
+   docker tag ghcr.io/actions/gha-runner-scale-set-controller:0.9.3 $ACR_LOGIN_SERVER/gha-runner-scale-set-controller:0.9.3
+   docker tag ghcr.io/actions/actions-runner:2.320.0 $ACR_LOGIN_SERVER/actions-runner:2.320.0
+   ```
+
+3. **Push the Images to ACR**:
+
+   ```powershell
+   docker push $ACR_LOGIN_SERVER/gha-runner-scale-set-controller:0.9.3
+   docker push $ACR_LOGIN_SERVER/actions-runner:2.320.0
+   ```
+
+### Step 5: Clone, Package, and Push the Helm Chart
+
+1. **Clone the GitHub Actions Runner Controller Repository**:
+
+   ```powershell
+   git clone https://github.com/actions/actions-runner-controller.git
+   cd actions-runner-controller/charts
+   ```
+
+2. **Package the Helm Chart**:
+
+   Use the `helm package` command to create `.tgz` files for the charts.
+
+   ```powershell
+   cd .\gha-runner-scale-set\
+   helm package .
+   helm push .\gha-runner-scale-set-0.9.3.tgz oci://hcats0503022020.azurecr.io/helm
+
+   cd ..\gha-runner-scale-set-controller\
+   helm package .
+   helm push .\gha-runner-scale-set-controller-0.9.3.tgz oci://hcats0503022020.azurecr.io/helm
+   ```
+
+### Step 6: Configure `kubectl` to Access the Cluster
 
 Configure `kubectl` to use AKS credentials:
 
-```bash
+```powershell
 az aks get-credentials --resource-group $AKS_RESOURCE_GROUP --name $AKS_CLUSTER_NAME
+kubectl get nodes  # Verify connectivity
 ```
 
-Verify the connection:
-
-```bash
-kubectl get nodes
-```
-
-### Step 6: Deploy the ARC Runners Controller from ACR
+### Step 7: Deploy the ARC Runners Controller from ACR
 
 1. **Create a Namespace for the Controller**:
 
-   ```bash
+   ```powershell
    kubectl create namespace $NAMESPACE_ARC_CONTROLLER
    ```
 
-2. **Deploy the ARC Controller from ACR using Helm**:
+2. **Deploy the Controller** from ACR using Helm:
 
-   Update the Helm command to point to the image repository in ACR:
-
-   ```bash
+   ```powershell
    helm install $ARC_CONTROLLER_NAME `
        --namespace $NAMESPACE_ARC_CONTROLLER `
        --version "0.9.3" `
-       --set image.repository="$ACR_NAME.azurecr.io/actions-runner-controller/gha-runner-scale-set-controller" `
-       oci://$ACR_NAME.azurecr.io/actions-runner-controller/gha-runner-scale-set-controller
+       --set image.repository="$ACR_LOGIN_SERVER/gha-runner-scale-set-controller" `
+       oci://$ACR_LOGIN_SERVER/helm/gha-runner-scale-set-controller
    ```
 
-### Step 7: Deploy the ARC Runner Scale Set from ACR on AKS
+### Step 8: Deploy the ARC Runner Scale Set on AKS
 
 1. **Create a Namespace for the Runners**:
 
-   ```bash
+   ```powershell
    kubectl create namespace $NAMESPACE_ARC_RUNNERS
    ```
 
-2. **Create the GitHub App Secret**:
+2. **Deploy the Runner Scale Set using Helm with GitHub PAT**:
 
-   Populate these values with your GitHub App credentials:
+   Use your GitHub PAT to authenticate the runner scale set.
 
-   ```bash
-   GITHUB_APP_ID="your_github_app_id"
-   GITHUB_APP_INSTALLATION_ID="your_github_app_installation_id"
-   GITHUB_APP_PRIVATE_KEY="your_github_app_private_key"
-
-   kubectl create secret generic $ARC_RUNNER_GITHUB_SECRET_NAME \
-       --namespace=$NAMESPACE_ARC_RUNNERS \
-       --from-literal=github_app_id=$GITHUB_APP_ID \
-       --from-literal=github_app_installation_id=$GITHUB_APP_INSTALLATION_ID \
-       --from-literal=github_app_private_key="$GITHUB_APP_PRIVATE_KEY"
+   ```powershell
+   helm install $ARC_RUNNER_SCALESET_NAME `
+       --namespace $NAMESPACE_ARC_RUNNERS `
+       --set githubConfigUrl=$GITHUB_CONFIG_URL `
+       --set "githubConfigSecret.github_token=$GITHUB_PAT" `
+       oci://$ACR_LOGIN_SERVER/helm/gha-runner-scale-set `
+       --debug
    ```
 
-3. **Deploy the Runner Scale Set using Helm**:
+### Step 9: Test the Setup with a Workflow
 
-   Deploy the ARC runner scale set from ACR, setting values for GitHub and the ACR image repository:
+1. **Create a Sample Workflow**: Assuming a sample workflow is provided at `.github/workflows/test-runner.yml`, this workflow should contain a `workflow_dispatch` event to manually trigger it.
 
-   ```bash
-   helm install $ARC_RUNNER_SCALESET_NAME \
-       --namespace $NAMESPACE_ARC_RUNNERS \
-       --create-namespace \
-       --set githubConfigUrl=$GITHUB_CONFIG_URL \
-       --set githubConfigSecret=$ARC_RUNNER_GITHUB_SECRET_NAME \
-       --set minRunners=1 \
-       --set maxRunners=3 \
-       --set runnerGroup=default \
-       --version "0.9.3" \
-       --set image.repository="$ACR_NAME.azurecr.io/actions-runner-controller/gha-runner-scale-set" \
-       oci://$ACR_NAME.azurecr.io/actions-runner-controller/gha-runner-scale-set
+2. **Run the Workflow**:
+   - Go to the **Actions** tab in your GitHub repository.
+   - Select the `test-runner.yml` workflow and click **Run workflow** to manually trigger it.
+   - This action should prompt the runner controller to create a pod in AKS to execute the job.
+
+3. **Verify Runner Pod Creation**:
+
+   Check if the runner pod was created and is active in the runner namespace:
+
+   ```powershell
+   kubectl get pods -n $NAMESPACE_ARC_RUNNERS --watch
    ```
 
-### Step 8: Verify the Deployment
+### Step 10: Debugging Tips
 
-Confirm the pods are running successfully:
-
-```bash
-kubectl get pods -n $NAMESPACE_ARC_CONTROLLER
-kubectl get pods -n $NAMESPACE_ARC_RUNNERS
-```
-
-### Step 9: Upgrade the ARC Runner Scale Set (if needed)
-
-To upgrade the ARC Runner Scale Set, use the `helm upgrade` command. The below example sets new parameters:
-
-```bash
-helm upgrade --install $ARC_RUNNER_SCALESET_NAME \
-    --namespace $NAMESPACE_ARC_RUNNERS \
-    --set githubConfigUrl=$GITHUB_CONFIG_URL \
-    --set githubConfigSecret=$ARC_RUNNER_GITHUB_SECRET_NAME \
-    --set minRunners=1 \
-    --set maxRunners=3 \
-    --set runnerGroup=default \
-    --version "0.9.3" \
-    --set image.repository="$ACR_NAME.azurecr.io/actions-runner-controller/gha-runner-scale-set" \
-    oci://$ACR_NAME.azurecr.io/actions-runner-controller/gha-runner-scale-set
-```
-
-### Step 10: Run GitHub Actions Workflows
-
-With the GitHub Actions Runner configured, workflows targeting the runner in the AKS cluster can be executed directly from GitHub. Once a workflow is triggered, a pod in AKS will be dynamically created, execute the job, and then terminate when complete.
+If the workflow remains in a "Waiting for a runner to pick up this job..." state:
+- **Check Labels**: Ensure that the `runs-on` label in the workflow matches the runner scale set label (`arc-runner-set` in this example).
+- **Inspect Logs**: Check logs for the controller and runner scale set:
+  ```powershell
+  kubectl logs -n $NAMESPACE_ARC_CONTROLLER -l app.kubernetes.io/name=$ARC_CONTROLLER_NAME
+  kubectl logs -n $NAMESPACE_ARC_RUNNERS -l app.kubernetes.io/name=$ARC_RUNNER_SCALESET_NAME
+  ```
+- **Verify GitHub PAT Permissions**: The GitHub PAT should have `repo`, `workflow`, and `admin:org` permissions.
